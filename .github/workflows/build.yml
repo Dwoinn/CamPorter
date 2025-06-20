@@ -105,7 +105,7 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           files: |
-            artifacts/CamPorter-linux/**/*
+            artifacts/CamPorter-ubuntu-22.04/**/*
             artifacts/CamPorter-windows-latest/**/*
             artifacts/CamPorter-macos-latest/**/*
           draft: false
