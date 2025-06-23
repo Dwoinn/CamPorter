@@ -352,13 +352,14 @@
   .logo-container {
     display: flex;
     align-items: center;
-    margin-bottom: 32px;
+    margin-bottom: 16px;
   }
 
   .app-logo {
-    width: 40px;
-    height: 40px;
-    margin-right: 12px;
+    width: 150px;
+    height: 150px;
+    margin-right: auto;
+    margin-left: auto;
   }
 
   .sidebar {
@@ -758,8 +759,8 @@
   <!-- Left Sidebar -->
   <div class="sidebar">
     <div class="logo-container">
-      <img src="/tauri.svg" alt="CamPorter Logo" class="app-logo" />
-      <h1>CamPorter</h1>
+      <img src="/camporter-logo.png" alt="CamPorter Logo" class="app-logo" />
+      <!-- <h1>CamPorter</h1> -->
     </div>
     
     <!-- Device Selection -->

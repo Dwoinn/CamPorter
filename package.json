@@ -9,7 +9,10 @@
     "preview": "vite preview",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "install-ffmpeg": "node src-tauri/install-ffmpeg.js",
+    "postinstall": "npm run install-ffmpeg",
+    "predev": "npm run install-ffmpeg"
   },
   "license": "MIT",
   "dependencies": {

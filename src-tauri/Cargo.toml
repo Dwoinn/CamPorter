@@ -30,6 +30,8 @@ serde_json = "1"
 base64 = "0.21"  # For encoding file data
 mime = "0.3.17"
 image = "0.25.6"
+tempfile = "3.8.1"  # For creating temporary files
+which = "5.0.0"  # For checking if FFmpeg is installed
 
 # Use thumbnails crate with feature flags for cross-compilation
 [target.'cfg(not(target_os = "windows"))'.dependencies]

@@ -8,6 +8,8 @@ use walkdir::WalkDir;
 use tauri::{Emitter, Manager};
 use base64::{engine::general_purpose, Engine as _};
 use image::{ImageFormat};
+use tempfile::tempdir;
+use which::which;
 
 #[cfg(not(target_os = "windows"))]
 use thumbnails::Thumbnailer;
@@ -305,73 +307,242 @@ async fn import_media(
     Ok(())
 }
 
-#[cfg(not(target_os = "windows"))]
-#[tauri::command]
-fn get_file_thumbnail(file_path: String) -> Result<String, String> {
-    let path = Path::new(&file_path);
-    
-    if !path.exists() {
-        return Err("File does not exist".to_string());
+/// Check if FFmpeg is installed on the system
+fn is_ffmpeg_available() -> bool {
+    // Try to find ffmpeg in PATH
+    println!("Checking if FFmpeg is available...");
+    let result = which("ffmpeg");
+    match &result {
+        Ok(path) => println!("FFmpeg found at: {}", path.display()),
+        Err(e) => println!("FFmpeg not found: {}", e),
     }
-    
-    // Use the thumbnails crate on non-Windows platforms
-    let thumbnailer = Thumbnailer::new(250, 250);
-    let thumb = thumbnailer
-        .get(path)
-        .map_err(|e| format!("Error generating thumbnail: {e}"))?;
-
-    let mut buf = Vec::new();
-    let mut cursor = std::io::Cursor::new(&mut buf);
-
-    thumb.write_to(&mut cursor, ImageFormat::Png)
-        .map_err(|e| format!("Error writing PNG: {e}"))?;
-
-    let res_base64 = general_purpose::STANDARD.encode(&buf);
-    
-    // Determine MIME type based on extension
-    let mime_type = get_mime_type(path);
-    
-    Ok(format!("data:{};base64,{}", mime_type, res_base64))
+    result.is_ok()
 }
 
-#[cfg(target_os = "windows")]
-#[tauri::command]
-fn get_file_thumbnail(file_path: String) -> Result<String, String> {
-    let path = Path::new(&file_path);
+/// Generate a video thumbnail using FFmpeg
+fn generate_video_thumbnail(video_path: &Path) -> Result<String, String> {
+    println!("Generating thumbnail for video: {}", video_path.display());
     
-    if !path.exists() {
-        return Err("File does not exist".to_string());
-    }
+    // Create a temporary directory for the thumbnail
+    let temp_dir = tempdir().map_err(|e| format!("Failed to create temp dir: {}", e))?;
+    let output_path = temp_dir.path().join("thumbnail.png");
     
-    // For Windows, use a simpler approach with just the image crate
-    let img = match image::open(path) {
-        Ok(img) => img,
-        Err(e) => {
-            // For files that can't be opened directly (like videos),
-            // return a generic icon based on file type
-            return generate_generic_thumbnail(path);
-        }
+    println!("Temp output path: {}", output_path.display());
+    
+    // Get the absolute path to the video file
+    let video_absolute_path = fs::canonicalize(video_path)
+        .map_err(|e| format!("Failed to get absolute path: {}", e))?;
+    
+    println!("Video absolute path: {}", video_absolute_path.display());
+    
+    // Build FFmpeg command to extract a frame from the video
+    let ffmpeg_cmd = if cfg!(target_os = "windows") {
+        "ffmpeg.exe"
+    } else {
+        "ffmpeg"
     };
     
-    // Resize the image to thumbnail size
-    let thumbnail = img.thumbnail(250, 250);
+    println!("Using FFmpeg command: {}", ffmpeg_cmd);
     
-    let mut buf = Vec::new();
-    let mut cursor = std::io::Cursor::new(&mut buf);
+    let mut command = Command::new(ffmpeg_cmd);
     
-    thumbnail.write_to(&mut cursor, ImageFormat::Png)
-        .map_err(|e| format!("Error writing PNG: {e}"))?;
+    // Add arguments
+    command
+        .arg("-i").arg(&video_absolute_path)
+        .arg("-ss").arg("00:00:01") // Take frame at 1 second
+        .arg("-vframes").arg("1")
+        .arg("-vf").arg("scale=250:-1") // Scale to 250px width, maintain aspect ratio
+        .arg("-y") // Overwrite output file if it exists
+        .arg(&output_path);
     
-    let res_base64 = general_purpose::STANDARD.encode(&buf);
+    // Print the command for debugging
+    let cmd_str = format!("{:?}", command);
+    println!("FFmpeg command: {}", cmd_str);
     
-    // Determine MIME type based on extension
-    let mime_type = get_mime_type(path);
+    // Execute FFmpeg command
+    let output = command.output().map_err(|e| format!("Failed to execute FFmpeg: {}", e))?;
+    
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        println!("FFmpeg stdout: {}", stdout);
+        println!("FFmpeg stderr: {}", stderr);
+        return Err(format!("FFmpeg error: {}", stderr));
+    }
+    
+    println!("FFmpeg executed successfully, checking if output file exists");
+    
+    // Check if the output file exists
+    if !output_path.exists() {
+        return Err(format!("Output file not created: {}", output_path.display()));
+    }
+    
+    println!("Output file exists, reading file");
+    
+    // Read the file to bytes and encode to base64
+    let img_data = fs::read(&output_path).map_err(|e| format!("Failed to read thumbnail: {}", e))?;
+    
+    println!("Read {} bytes from output file", img_data.len());
+    
+    let res_base64 = general_purpose::STANDARD.encode(&img_data);
+    
+    // Determine MIME type
+    let mime_type = "image/png";
+    
+    println!("Successfully generated thumbnail");
     
     Ok(format!("data:{};base64,{}", mime_type, res_base64))
 }
 
-#[cfg(target_os = "windows")]
-fn generate_generic_thumbnail(path: &Path) -> Result<String, String> {
+#[tauri::command]
+fn get_file_thumbnail(file_path: String) -> Result<String, String> {
+    println!("Getting thumbnail for file: {}", file_path);
+    
+    let path = Path::new(&file_path);
+    
+    if !path.exists() {
+        println!("File does not exist: {}", file_path);
+        return Err("File does not exist".to_string());
+    }
+    
+    let is_video = match path.extension().and_then(|e| e.to_str()) {
+        Some(ext) => {
+            let ext_lower = ext.to_lowercase();
+            println!("File extension: {}", ext_lower);
+            matches!(ext_lower.as_str(), "mp4" | "mov" | "avi" | "mkv")
+        },
+        None => {
+            println!("No file extension found");
+            false
+        },
+    };
+    
+    if is_video {
+        println!("File is a video, attempting to generate thumbnail");
+        
+        // For videos, try to use FFmpeg first if available
+        if is_ffmpeg_available() {
+            println!("FFmpeg is available, using it to generate thumbnail");
+            match generate_video_thumbnail(path) {
+                Ok(data_url) => {
+                    println!("Successfully generated thumbnail with FFmpeg");
+                    return Ok(data_url);
+                },
+                Err(e) => {
+                    println!("Failed to generate thumbnail with FFmpeg: {}", e);
+                    println!("Falling back to alternative methods");
+                    
+                    // Fall back to platform-specific methods if FFmpeg fails
+                    #[cfg(not(target_os = "windows"))]
+                    {
+                        println!("Using Thumbnailer on non-Windows platform");
+                        let thumbnailer = Thumbnailer::new(250, 250);
+                        match thumbnailer.get(path) {
+                            Ok(img) => {
+                                println!("Thumbnailer succeeded, converting to base64");
+                                let mut buf = Vec::new();
+                                let mut cursor = std::io::Cursor::new(&mut buf);
+                                
+                                if let Err(e) = img.write_to(&mut cursor, ImageFormat::Png) {
+                                    println!("Failed to write thumbnail to buffer: {}", e);
+                                    return generate_fallback_thumbnail(path);
+                                }
+                                
+                                let res_base64 = general_purpose::STANDARD.encode(&buf);
+                                let mime_type = get_mime_type(path);
+                                
+                                println!("Successfully generated thumbnail with Thumbnailer");
+                                return Ok(format!("data:{};base64,{}", mime_type, res_base64));
+                            },
+                            Err(e) => {
+                                println!("Thumbnailer failed: {}", e);
+                                println!("Using fallback thumbnail");
+                                return generate_fallback_thumbnail(path);
+                            },
+                        }
+                    }
+                    
+                    #[cfg(target_os = "windows")]
+                    {
+                        println!("On Windows, using fallback thumbnail");
+                        return generate_fallback_thumbnail(path);
+                    }
+                }
+            }
+        } else {
+            println!("FFmpeg is not available");
+            
+            // If FFmpeg is not available, fall back to platform-specific methods
+            #[cfg(not(target_os = "windows"))]
+            {
+                println!("Using Thumbnailer on non-Windows platform");
+                let thumbnailer = Thumbnailer::new(250, 250);
+                match thumbnailer.get(path) {
+                    Ok(img) => {
+                        println!("Thumbnailer succeeded, converting to base64");
+                        let mut buf = Vec::new();
+                        let mut cursor = std::io::Cursor::new(&mut buf);
+                        
+                        if let Err(e) = img.write_to(&mut cursor, ImageFormat::Png) {
+                            println!("Failed to write thumbnail to buffer: {}", e);
+                            return generate_fallback_thumbnail(path);
+                        }
+                        
+                        let res_base64 = general_purpose::STANDARD.encode(&buf);
+                        let mime_type = get_mime_type(path);
+                        
+                        println!("Successfully generated thumbnail with Thumbnailer");
+                        return Ok(format!("data:{};base64,{}", mime_type, res_base64));
+                    },
+                    Err(e) => {
+                        println!("Thumbnailer failed: {}", e);
+                        println!("Using fallback thumbnail");
+                        return generate_fallback_thumbnail(path);
+                    },
+                }
+            }
+            
+            #[cfg(target_os = "windows")]
+            {
+                println!("On Windows, using fallback thumbnail");
+                return generate_fallback_thumbnail(path);
+            }
+        }
+    } else {
+        println!("File is an image, using image crate");
+        
+        // For images, use the image crate directly
+        match image::open(path) {
+            Ok(img) => {
+                println!("Successfully opened image, creating thumbnail");
+                let thumbnail = img.thumbnail(250, 250);
+                
+                let mut buf = Vec::new();
+                let mut cursor = std::io::Cursor::new(&mut buf);
+                
+                if let Err(e) = thumbnail.write_to(&mut cursor, ImageFormat::Png) {
+                    println!("Failed to write thumbnail to buffer: {}", e);
+                    return generate_fallback_thumbnail(path);
+                }
+                
+                let res_base64 = general_purpose::STANDARD.encode(&buf);
+                let mime_type = get_mime_type(path);
+                
+                println!("Successfully generated thumbnail for image");
+                return Ok(format!("data:{};base64,{}", mime_type, res_base64));
+            },
+            Err(e) => {
+                println!("Failed to open image: {}", e);
+                println!("Using fallback thumbnail");
+                return generate_fallback_thumbnail(path);
+            },
+        }
+    }
+}
+
+fn generate_fallback_thumbnail(path: &Path) -> Result<String, String> {
+    println!("Generating fallback thumbnail for: {}", path.display());
+    
     // Create a simple colored rectangle based on file type
     let width = 250;
     let height = 250;
@@ -379,28 +550,91 @@ fn generate_generic_thumbnail(path: &Path) -> Result<String, String> {
     
     // Fill with a color based on file extension
     let color = match path.extension().and_then(|e| e.to_str()) {
-        Some("mp4") | Some("mov") | Some("avi") | Some("mkv") => [120, 120, 255, 255], // Blue for video
-        Some("jpg") | Some("jpeg") | Some("png") | Some("gif") => [120, 255, 120, 255], // Green for images
-        _ => [200, 200, 200, 255], // Gray for other types
+        Some(ext) => {
+            let ext_lower = ext.to_lowercase();
+            match ext_lower.as_str() {
+                "mp4" | "mov" | "avi" | "mkv" => [120, 120, 255, 255], // Blue for video
+                "jpg" | "jpeg" | "png" | "gif" => [120, 255, 120, 255], // Green for images
+                _ => [200, 200, 200, 255], // Gray for other types
+            }
+        },
+        None => [200, 200, 200, 255], // Gray for unknown types
     };
     
+    println!("Using color: {:?}", color);
+    
+    // Draw a video icon in the center for video files
+    let is_video = match path.extension().and_then(|e| e.to_str()) {
+        Some(ext) => {
+            let ext_lower = ext.to_lowercase();
+            matches!(ext_lower.as_str(), "mp4" | "mov" | "avi" | "mkv")
+        },
+        None => false,
+    };
+    
+    // Fill the background
     for pixel in img.pixels_mut() {
         *pixel = image::Rgba(color);
+    }
+    
+    // If it's a video, add a play icon indicator
+    if is_video {
+        println!("Adding play icon indicator for video");
+        
+        // Draw a simple play icon (white triangle) in the center
+        let center_x = width / 2;
+        let center_y = height / 2;
+        
+        // Draw a white circle in the center
+        let radius = 40;
+        for y in 0..height {
+            for x in 0..width {
+                let dx = x as i32 - center_x as i32;
+                let dy = y as i32 - center_y as i32;
+                let distance = (dx * dx + dy * dy) as f32;
+                
+                // Circle outline
+                if distance.sqrt() <= radius as f32 && distance.sqrt() >= (radius - 5) as f32 {
+                    img.put_pixel(x, y, image::Rgba([255, 255, 255, 255]));
+                }
+                
+                // Play triangle
+                if distance.sqrt() < radius as f32 - 10.0 {
+                    // Simple right-pointing triangle
+                    if x > center_x - 15 && x < center_x + 15 &&
+                       y > center_y - 15 && y < center_y + 15 {
+                        if x > center_x - 10 &&
+                           y > center_y - 10 - (x - center_x) / 2 &&
+                           y < center_y + 10 - (x - center_x) / 2 {
+                            img.put_pixel(x, y, image::Rgba([255, 255, 255, 255]));
+                        }
+                    }
+                }
+            }
+        }
     }
     
     let mut buf = Vec::new();
     let mut cursor = std::io::Cursor::new(&mut buf);
     
-    image::DynamicImage::ImageRgba8(img)
-        .write_to(&mut cursor, ImageFormat::Png)
-        .map_err(|e| format!("Error writing PNG: {e}"))?;
+    println!("Writing fallback thumbnail to buffer");
     
-    let res_base64 = general_purpose::STANDARD.encode(&buf);
-    
-    // Determine MIME type based on extension
-    let mime_type = get_mime_type(path);
-    
-    Ok(format!("data:{};base64,{}", mime_type, res_base64))
+    match image::DynamicImage::ImageRgba8(img).write_to(&mut cursor, ImageFormat::Png) {
+        Ok(_) => {
+            println!("Successfully wrote fallback thumbnail to buffer");
+            let res_base64 = general_purpose::STANDARD.encode(&buf);
+            
+            // Determine MIME type based on extension
+            let mime_type = get_mime_type(path);
+            
+            println!("Fallback thumbnail generated successfully");
+            Ok(format!("data:{};base64,{}", mime_type, res_base64))
+        },
+        Err(e) => {
+            println!("Failed to write fallback thumbnail: {}", e);
+            Err(format!("Error writing PNG: {e}"))
+        }
+    }
 }
 
 fn get_mime_type(path: &Path) -> &'static str {
