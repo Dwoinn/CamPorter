@@ -760,10 +760,62 @@ pub fn run() {
             load_destination_path,
             open_destination_folder,
             check_files_exist_in_destination,
-            read_log_file
+            read_log_file,
+            copy_to_temp
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+#[tauri::command]
+fn copy_to_temp(file_path: String, app: tauri::AppHandle) -> Result<String, String> {
+    use std::fs;
+    use std::path::Path;
+
+    log::info!("copy_to_temp called with file_path: {}", file_path);
+
+    let src = Path::new(&file_path);
+    if !src.exists() {
+        log::error!("Source file does not exist: {}", file_path);
+        return Err("Source file does not exist".to_string());
+    }
+
+    let temp_dir = match app.path().temp_dir() {
+        Ok(dir) => dir,
+        Err(e) => {
+            log::error!("Failed to get temp dir: {}", e);
+            return Err(e.to_string());
+        }
+    };
+    let file_name = match src.file_name().and_then(|n| n.to_str()) {
+        Some(name) => name,
+        None => {
+            log::error!("Invalid file name for: {}", file_path);
+            return Err("Invalid file name".to_string());
+        }
+    };
+    let dest_path = temp_dir.join(file_name);
+
+    // If file already exists in temp, remove it first
+    if dest_path.exists() {
+        match fs::remove_file(&dest_path) {
+            Ok(_) => log::info!("Removed existing file in temp: {}", dest_path.display()),
+            Err(e) => {
+                log::error!("Failed to remove existing file in temp: {}: {}", dest_path.display(), e);
+                return Err(e.to_string());
+            }
+        }
+    }
+
+    // Copy the file
+    match fs::copy(&src, &dest_path) {
+        Ok(_) => log::info!("Copied file to temp: {}", dest_path.display()),
+        Err(e) => {
+            log::error!("Failed to copy file to temp: {}: {}", dest_path.display(), e);
+            return Err(e.to_string());
+        }
+    }
+
+    Ok(dest_path.to_string_lossy().to_string())
 }
 
 #[tauri::command]

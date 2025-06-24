@@ -3,6 +3,74 @@
   import { listen } from '@tauri-apps/api/event';
   import { open } from '@tauri-apps/plugin-dialog';
   import { onMount, tick } from 'svelte';
+  // import MediaPreview from '../components/MediaPreview.svelte';
+  import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
+
+  let previewFile: MediaFile | null = null;
+  let previewSourcePath: string = '';
+
+  // Helper: get source path for preview (destination if exists, else original)
+  function getPreviewSourcePath(file: MediaFile): string {
+    if (existingFiles.has(file.path) && destination) {
+      // File exists in destination, use destination path
+      // Use file.name to join with destination
+      return `${destination}/${file.name}`;
+    }
+    // Else, use original path
+    return file.path;
+  }
+
+  // Long click/right click logic
+  let longClickTimeout: ReturnType<typeof setTimeout> | null = null;
+  function handleFileCardPointerDown(file: MediaFile, event: PointerEvent) {
+    if (event.button === 2) {
+      // Right click: open preview immediately
+      openPreview(file);
+      return;
+    }
+    longClickTimeout = setTimeout(() => {
+      openPreview(file);
+    }, 500);
+  }
+  function handleFileCardPointerUpOrLeave() {
+    if (longClickTimeout) {
+      clearTimeout(longClickTimeout);
+      longClickTimeout = null;
+    }
+  }
+  function handleFileCardContextMenu(file: MediaFile, event: MouseEvent) {
+    event.preventDefault();
+    openPreview(file);
+  }
+  async function openPreview(file: MediaFile) {
+    // Build query string for preview window
+    const params = new URLSearchParams({
+      name: file.name,
+      path: getPreviewSourcePath(file),
+      extension: file.extension,
+      is_image: String(file.is_image),
+      is_video: String(file.is_video)
+    });
+    // Use dev server URL in development
+    const url = `http://localhost:1420/preview?${params.toString()}`;
+    console.log(`url: ${url}`);
+    // Open new Tauri window
+    new WebviewWindow(
+      `media-preview`,
+      {
+        url,
+        width: 1200,
+        height: 900,
+        title: `Preview: ${file.name}`,
+        resizable: true,
+        fullscreen: true
+      }
+    );
+  }
+  function closePreview() {
+    previewFile = null;
+    previewSourcePath = '';
+  }
 
   interface Drive {
     name: string;
@@ -885,6 +953,10 @@
           <div
             class="file-card {selectedFiles.has(file.path) ? 'selected' : ''}"
             on:click={() => toggleFileSelection(file.path)}
+            on:pointerdown={(e) => handleFileCardPointerDown(file, e)}
+            on:pointerup={handleFileCardPointerUpOrLeave}
+            on:pointerleave={handleFileCardPointerUpOrLeave}
+            on:contextmenu={(e) => handleFileCardContextMenu(file, e)}
             on:keydown={(e) => {
               if (e.key === 'Enter' || e.key === ' ') {
                 toggleFileSelection(file.path);
@@ -956,4 +1028,5 @@
   </div>
 </div>
 
+<!-- MediaPreview overlay removed: now opens in a new window -->
 
