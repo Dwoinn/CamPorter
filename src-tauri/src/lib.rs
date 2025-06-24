@@ -10,9 +10,13 @@ use base64::{engine::general_purpose, Engine as _};
 use image::{ImageFormat};
 use tempfile::tempdir;
 use which::which;
+use tauri_plugin_log;
+use std::io::Read;
 
 #[cfg(not(target_os = "windows"))]
 use thumbnails::Thumbnailer;
+
+use log::{info, warn, error};
 
 #[derive(Serialize)]
 struct RemovableDrive {
@@ -310,30 +314,30 @@ async fn import_media(
 /// Check if FFmpeg is installed on the system
 fn is_ffmpeg_available() -> bool {
     // Try to find ffmpeg in PATH
-    println!("Checking if FFmpeg is available...");
+    info!("Checking if FFmpeg is available...");
     let result = which("ffmpeg");
     match &result {
-        Ok(path) => println!("FFmpeg found at: {}", path.display()),
-        Err(e) => println!("FFmpeg not found: {}", e),
+        Ok(path) => info!("FFmpeg found at: {}", path.display()),
+        Err(e) => warn!("FFmpeg not found: {}", e),
     }
     result.is_ok()
 }
 
 /// Generate a video thumbnail using FFmpeg
 fn generate_video_thumbnail(video_path: &Path) -> Result<String, String> {
-    println!("Generating thumbnail for video: {}", video_path.display());
+    info!("Generating thumbnail for video: {}", video_path.display());
     
     // Create a temporary directory for the thumbnail
     let temp_dir = tempdir().map_err(|e| format!("Failed to create temp dir: {}", e))?;
     let output_path = temp_dir.path().join("thumbnail.png");
     
-    println!("Temp output path: {}", output_path.display());
+    info!("Temp output path: {}", output_path.display());
     
     // Get the absolute path to the video file
     let video_absolute_path = fs::canonicalize(video_path)
         .map_err(|e| format!("Failed to get absolute path: {}", e))?;
     
-    println!("Video absolute path: {}", video_absolute_path.display());
+    info!("Video absolute path: {}", video_absolute_path.display());
     
     // Build FFmpeg command to extract a frame from the video
     let ffmpeg_cmd = if cfg!(target_os = "windows") {
@@ -342,7 +346,7 @@ fn generate_video_thumbnail(video_path: &Path) -> Result<String, String> {
         "ffmpeg"
     };
     
-    println!("Using FFmpeg command: {}", ffmpeg_cmd);
+    info!("Using FFmpeg command: {}", ffmpeg_cmd);
     
     let mut command = Command::new(ffmpeg_cmd);
     
@@ -357,7 +361,7 @@ fn generate_video_thumbnail(video_path: &Path) -> Result<String, String> {
     
     // Print the command for debugging
     let cmd_str = format!("{:?}", command);
-    println!("FFmpeg command: {}", cmd_str);
+    info!("FFmpeg command: {}", cmd_str);
     
     // Execute FFmpeg command
     let output = command.output().map_err(|e| format!("Failed to execute FFmpeg: {}", e))?;
@@ -365,72 +369,72 @@ fn generate_video_thumbnail(video_path: &Path) -> Result<String, String> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        println!("FFmpeg stdout: {}", stdout);
-        println!("FFmpeg stderr: {}", stderr);
+        info!("FFmpeg stdout: {}", stdout);
+        error!("FFmpeg stderr: {}", stderr);
         return Err(format!("FFmpeg error: {}", stderr));
     }
     
-    println!("FFmpeg executed successfully, checking if output file exists");
+    info!("FFmpeg executed successfully, checking if output file exists");
     
     // Check if the output file exists
     if !output_path.exists() {
         return Err(format!("Output file not created: {}", output_path.display()));
     }
     
-    println!("Output file exists, reading file");
+    info!("Output file exists, reading file");
     
     // Read the file to bytes and encode to base64
     let img_data = fs::read(&output_path).map_err(|e| format!("Failed to read thumbnail: {}", e))?;
     
-    println!("Read {} bytes from output file", img_data.len());
+    info!("Read {} bytes from output file", img_data.len());
     
     let res_base64 = general_purpose::STANDARD.encode(&img_data);
     
     // Determine MIME type
     let mime_type = "image/png";
     
-    println!("Successfully generated thumbnail");
+    info!("Successfully generated thumbnail");
     
     Ok(format!("data:{};base64,{}", mime_type, res_base64))
 }
 
 #[tauri::command]
 fn get_file_thumbnail(file_path: String) -> Result<String, String> {
-    println!("Getting thumbnail for file: {}", file_path);
+    info!("Getting thumbnail for file: {}", file_path);
     
     let path = Path::new(&file_path);
     
     if !path.exists() {
-        println!("File does not exist: {}", file_path);
+        error!("File does not exist: {}", file_path);
         return Err("File does not exist".to_string());
     }
     
     let is_video = match path.extension().and_then(|e| e.to_str()) {
         Some(ext) => {
             let ext_lower = ext.to_lowercase();
-            println!("File extension: {}", ext_lower);
+            info!("File extension: {}", ext_lower);
             matches!(ext_lower.as_str(), "mp4" | "mov" | "avi" | "mkv")
         },
         None => {
-            println!("No file extension found");
+            warn!("No file extension found");
             false
         },
     };
     
     if is_video {
-        println!("File is a video, attempting to generate thumbnail");
+        info!("File is a video, attempting to generate thumbnail");
         
         // For videos, try to use FFmpeg first if available
         if is_ffmpeg_available() {
-            println!("FFmpeg is available, using it to generate thumbnail");
+            info!("FFmpeg is available, using it to generate thumbnail");
             match generate_video_thumbnail(path) {
                 Ok(data_url) => {
-                    println!("Successfully generated thumbnail with FFmpeg");
+                    info!("Successfully generated thumbnail with FFmpeg");
                     return Ok(data_url);
                 },
                 Err(e) => {
-                    println!("Failed to generate thumbnail with FFmpeg: {}", e);
-                    println!("Falling back to alternative methods");
+                    error!("Failed to generate thumbnail with FFmpeg: {}", e);
+                    warn!("Falling back to alternative methods");
                     
                     // Fall back to platform-specific methods if FFmpeg fails
                     #[cfg(not(target_os = "windows"))]
@@ -464,13 +468,13 @@ fn get_file_thumbnail(file_path: String) -> Result<String, String> {
                     
                     #[cfg(target_os = "windows")]
                     {
-                        println!("On Windows, using fallback thumbnail");
+                        warn!("On Windows, using fallback thumbnail");
                         return generate_fallback_thumbnail(path);
                     }
                 }
             }
         } else {
-            println!("FFmpeg is not available");
+            warn!("FFmpeg is not available");
             
             // If FFmpeg is not available, fall back to platform-specific methods
             #[cfg(not(target_os = "windows"))]
@@ -504,36 +508,36 @@ fn get_file_thumbnail(file_path: String) -> Result<String, String> {
             
             #[cfg(target_os = "windows")]
             {
-                println!("On Windows, using fallback thumbnail");
+                warn!("On Windows, using fallback thumbnail");
                 return generate_fallback_thumbnail(path);
             }
         }
     } else {
-        println!("File is an image, using image crate");
+        info!("File is an image, using image crate");
         
         // For images, use the image crate directly
         match image::open(path) {
             Ok(img) => {
-                println!("Successfully opened image, creating thumbnail");
+                info!("Successfully opened image, creating thumbnail");
                 let thumbnail = img.thumbnail(250, 250);
                 
                 let mut buf = Vec::new();
                 let mut cursor = std::io::Cursor::new(&mut buf);
                 
                 if let Err(e) = thumbnail.write_to(&mut cursor, ImageFormat::Png) {
-                    println!("Failed to write thumbnail to buffer: {}", e);
+                    error!("Failed to write thumbnail to buffer: {}", e);
                     return generate_fallback_thumbnail(path);
                 }
                 
                 let res_base64 = general_purpose::STANDARD.encode(&buf);
                 let mime_type = get_mime_type(path);
                 
-                println!("Successfully generated thumbnail for image");
+                info!("Successfully generated thumbnail for image");
                 return Ok(format!("data:{};base64,{}", mime_type, res_base64));
             },
             Err(e) => {
-                println!("Failed to open image: {}", e);
-                println!("Using fallback thumbnail");
+                error!("Failed to open image: {}", e);
+                warn!("Using fallback thumbnail");
                 return generate_fallback_thumbnail(path);
             },
         }
@@ -541,7 +545,7 @@ fn get_file_thumbnail(file_path: String) -> Result<String, String> {
 }
 
 fn generate_fallback_thumbnail(path: &Path) -> Result<String, String> {
-    println!("Generating fallback thumbnail for: {}", path.display());
+    info!("Generating fallback thumbnail for: {}", path.display());
     
     // Create a simple colored rectangle based on file type
     let width = 250;
@@ -561,7 +565,7 @@ fn generate_fallback_thumbnail(path: &Path) -> Result<String, String> {
         None => [200, 200, 200, 255], // Gray for unknown types
     };
     
-    println!("Using color: {:?}", color);
+    info!("Using color: {:?}", color);
     
     // Draw a video icon in the center for video files
     let is_video = match path.extension().and_then(|e| e.to_str()) {
@@ -579,7 +583,7 @@ fn generate_fallback_thumbnail(path: &Path) -> Result<String, String> {
     
     // If it's a video, add a play icon indicator
     if is_video {
-        println!("Adding play icon indicator for video");
+        info!("Adding play icon indicator for video");
         
         // Draw a simple play icon (white triangle) in the center
         let center_x = width / 2;
@@ -617,21 +621,21 @@ fn generate_fallback_thumbnail(path: &Path) -> Result<String, String> {
     let mut buf = Vec::new();
     let mut cursor = std::io::Cursor::new(&mut buf);
     
-    println!("Writing fallback thumbnail to buffer");
+    info!("Writing fallback thumbnail to buffer");
     
     match image::DynamicImage::ImageRgba8(img).write_to(&mut cursor, ImageFormat::Png) {
         Ok(_) => {
-            println!("Successfully wrote fallback thumbnail to buffer");
+            info!("Successfully wrote fallback thumbnail to buffer");
             let res_base64 = general_purpose::STANDARD.encode(&buf);
             
             // Determine MIME type based on extension
             let mime_type = get_mime_type(path);
             
-            println!("Fallback thumbnail generated successfully");
+            info!("Fallback thumbnail generated successfully");
             Ok(format!("data:{};base64,{}", mime_type, res_base64))
         },
         Err(e) => {
-            println!("Failed to write fallback thumbnail: {}", e);
+            error!("Failed to write fallback thumbnail: {}", e);
             Err(format!("Error writing PNG: {e}"))
         }
     }
@@ -732,15 +736,18 @@ fn check_files_exist_in_destination(
 
 #[tauri::command]
 fn greet(name: &str) -> String {
+    info!("Greet command called with name: {}", name);
     format!("Hello, {}! You've been greeted from Rust!", name)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    info!("Starting CamPorter Tauri application");
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_log::Builder::default().build())
         .invoke_handler(tauri::generate_handler![
             greet,
             list_removable_drives,
@@ -752,8 +759,22 @@ pub fn run() {
             save_destination_path,
             load_destination_path,
             open_destination_folder,
-            check_files_exist_in_destination
+            check_files_exist_in_destination,
+            read_log_file
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[tauri::command]
+fn read_log_file(app: tauri::AppHandle) -> Result<String, String> {
+    let log_dir = app.path().app_log_dir().map_err(|e| e.to_string())?;
+    let log_file = log_dir.join("app.log");
+    if !log_file.exists() {
+        return Err("Log file does not exist".to_string());
+    }
+    let mut file = std::fs::File::open(log_file).map_err(|e| e.to_string())?;
+    let mut contents = String::new();
+    file.read_to_string(&mut contents).map_err(|e| e.to_string())?;
+    Ok(contents)
 }
